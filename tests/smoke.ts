@@ -8,23 +8,39 @@ import { fileURLToPath } from "node:url";
 const RESULT_START = "ATP_WORKER_RESULT_JSON_START";
 const RESULT_END = "ATP_WORKER_RESULT_JSON_END";
 
-// Fake the Pi worker subprocess. The extension respawns this same script via getPiInvocation().
+// Fake the Pi planner/worker subprocess. The extension respawns this same script via getPiInvocation().
 if (process.argv.includes("--mode")) {
   const prompt = process.argv[process.argv.length - 1] || "";
   const root = prompt.match(/project_root: (.*)/)?.[1]?.trim();
-  if (root) await fsp.writeFile(path.join(root, "hello.txt"), "done\n", "utf8");
+  let text: string;
 
-  const text = [
-    "fake worker complete",
-    RESULT_START,
-    JSON.stringify({
-      status: "DONE",
-      report: "Changed hello.txt to done and verified by fake worker.",
-      artifacts: ["hello.txt"],
-      verification: ["fake smoke check passed"],
-    }),
-    RESULT_END,
-  ].join("\n");
+  if (!root) {
+    text = JSON.stringify({
+      meta: { project_name: "standalone smoke plan", version: "1.3", project_status: "DRAFT" },
+      nodes: {
+        n1: {
+          title: "Smoke node",
+          instruction: "Edit hello.txt to prove the worker path runs.",
+          dependencies: [],
+          status: "READY",
+          reasoning_effort: "minimal",
+        },
+      },
+    });
+  } else {
+    await fsp.writeFile(path.join(root, "hello.txt"), "done\n", "utf8");
+    text = [
+      "fake worker complete",
+      RESULT_START,
+      JSON.stringify({
+        status: "DONE",
+        report: "Changed hello.txt to done and verified by fake worker.",
+        artifacts: ["hello.txt"],
+        verification: ["fake smoke check passed"],
+      }),
+      RESULT_END,
+    ].join("\n");
+  }
 
   console.log(JSON.stringify({
     type: "message_end",
@@ -112,6 +128,19 @@ try {
   extension(pi as any);
 
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-atp-smoke-"));
+  const generatedPlanPath = path.join(tmp, "generated.atp.json");
+  const generated = await tools.atp_create_plan.execute(
+    "plan",
+    { planPath: generatedPlanPath, brief: "standalone smoke plan", mode: "micro" },
+    undefined,
+    undefined,
+    { cwd: tmp, hasUI: false, ui: { notify() {} }, isIdle: () => true },
+  );
+  if (!generated.content[0].text.includes("Created ATP micro plan")) throw new Error(`plan creation failed: ${generated.content[0].text}`);
+  const generatedGraph = JSON.parse(await fsp.readFile(generatedPlanPath, "utf8"));
+  if (generatedGraph.meta.project_status !== "DRAFT") throw new Error("generated plan was not forced to DRAFT");
+  if (!generatedGraph.nodes.n1) throw new Error("generated plan missing smoke node");
+
   const planPath = path.join(tmp, ".atp.json");
   await fsp.writeFile(path.join(tmp, "hello.txt"), "before\n", "utf8");
   await fsp.writeFile(planPath, `${JSON.stringify({

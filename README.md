@@ -1,10 +1,10 @@
 # pi-atp-orchestrator
 
-A Pi extension for running ATP (Agent Task Protocol) plans directly inside Pi — no `atp-runner` process required.
+A standalone Pi extension for running ATP (Agent Task Protocol) plans directly inside Pi — no external runner process required.
 
 ## What it does
 
-- Generates ATP v1.3 plans from the `atp-runner` architect prompts.
+- Generates ATP v1.3 plans from bundled architect prompts.
 - Lets the active Pi chat model act as orchestrator/judge.
 - Spawns background Pi subprocesses as workers for individual READY nodes.
 - Stores worker results as candidate fields in `.atp.json`.
@@ -13,16 +13,13 @@ A Pi extension for running ATP (Agent Task Protocol) plans directly inside Pi �
 ## Requirements
 
 - `pi` CLI installed.
-- Local ATP prompt source. Defaults to:
+
+This package is standalone: the ATP architect prompts are bundled in `./prompts/`. It does **not** require any separate ATP runner package or process.
+
+If you intentionally want to use custom architect prompts, point the extension at a directory containing `ARCHITECT.md` and `MICRO_ARCHITECT.md`:
 
 ```bash
-~/Code/personal/atp-runner
-```
-
-Override with:
-
-```bash
-export ATP_RUNNER_DIR=/path/to/atp-runner
+export PI_ATP_PROMPTS_DIR=/path/to/custom/prompts
 ```
 
 ## Install

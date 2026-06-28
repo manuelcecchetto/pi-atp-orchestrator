@@ -71,7 +71,7 @@ type ParsedWorkerResult = {
 };
 
 const DEFAULT_PLAN_PATH = process.env.ATP_FILE || ".atp.json";
-const ATP_RUNNER_DIR = process.env.ATP_RUNNER_DIR || path.join(os.homedir(), "Code", "personal", "atp-runner");
+const EXTENSION_DIR = path.dirname(decodeURIComponent(new URL(import.meta.url).pathname));
 const COMPLETION_TYPE = "pi-atp-orchestrator-worker-complete";
 const RESULT_START = "ATP_WORKER_RESULT_JSON_START";
 const RESULT_END = "ATP_WORKER_RESULT_JSON_END";
@@ -565,9 +565,24 @@ async function spawnClaimed(planPath: string, cwd: string, claimedTask: ClaimedT
 	return run;
 }
 
+function resolveBundledPromptPath(mode: "micro" | "macro"): string {
+	const fileName = mode === "micro" ? "MICRO_ARCHITECT.md" : "ARCHITECT.md";
+	const candidates = [
+		process.env.PI_ATP_PROMPTS_DIR ? path.join(process.env.PI_ATP_PROMPTS_DIR, fileName) : "",
+		path.resolve(EXTENSION_DIR, "..", "prompts", fileName),
+		path.resolve(EXTENSION_DIR, "prompts", fileName),
+	].filter(Boolean);
+	const hit = candidates.find((candidate) => fs.existsSync(candidate));
+	if (!hit) {
+		throw new Error(
+			`Missing bundled ATP prompt ${fileName}. Expected one of: ${candidates.join(", ")}. Reinstall pi-atp-orchestrator or set PI_ATP_PROMPTS_DIR.`,
+		);
+	}
+	return hit;
+}
+
 function readArchitectPrompt(mode: "micro" | "macro"): string {
-	const file = path.join(ATP_RUNNER_DIR, mode === "micro" ? "MICRO_ARCHITECT.md" : "ARCHITECT.md");
-	return fs.readFileSync(file, "utf8");
+	return fs.readFileSync(resolveBundledPromptPath(mode), "utf8");
 }
 
 function orchestratorPrompt(): string {
@@ -598,7 +613,7 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("atp-plan", {
-		description: "Create an ATP plan with atp-runner ARCHITECT/MICRO_ARCHITECT: /atp-plan [micro|macro] <brief>",
+		description: "Create an ATP plan with the bundled ARCHITECT/MICRO_ARCHITECT prompts: /atp-plan [micro|macro] <brief>",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const maybeMode = parts[0]?.toLowerCase();
@@ -653,8 +668,8 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "atp_create_plan",
 		label: "ATP Create Plan",
-		description: "Run the atp-runner ARCHITECT or MICRO_ARCHITECT prompt in a separate pi subprocess and write an ATP v1.3 DRAFT plan.",
-		promptSnippet: "Create an ATP v1.3 DRAFT plan using the atp-runner architect prompts.",
+		description: "Run the bundled ARCHITECT or MICRO_ARCHITECT prompt in a separate pi subprocess and write an ATP v1.3 DRAFT plan.",
+		promptSnippet: "Create an ATP v1.3 DRAFT plan using the bundled architect prompts.",
 		promptGuidelines: ["Use atp_create_plan for initial ATP planning; use micro mode unless the work needs macro commits/PR-sized nodes."],
 		parameters: Type.Object({
 			planPath: PlanPathParam,

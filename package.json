@@ -12,6 +12,12 @@
     "agent-task-protocol",
     "orchestration"
   ],
+  "files": [
+    "extensions/",
+    "prompts/",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./extensions"
