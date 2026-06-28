@@ -1,0 +1,32 @@
+{
+  "name": "pi-atp-orchestrator",
+  "version": "0.1.0",
+  "description": "Pi extension for direct ATP planning, orchestration, background workers, and judge-gated node completion.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "atp",
+    "agent-task-protocol",
+    "orchestration"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "check": "bun build extensions/pi-atp-orchestrator.ts --outfile=/tmp/pi-atp-orchestrator-check.js --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external typebox",
+    "smoke": "bun tests/smoke.ts",
+    "validate": "npm run check && npm run smoke"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
