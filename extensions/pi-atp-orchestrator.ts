@@ -490,7 +490,7 @@ function deliverCompletion(run: DirectRun): void {
 		"",
 		result?.report || run.error || "(no report)",
 		"",
-		"Judge this result. Inspect the diff or artifacts if needed. If acceptable, call atp_accept_node. If not, call atp_reject_node or edit the ATP graph. Keep user-facing prose minimal.",
+		"Judge this result. Inspect the diff or artifacts if needed. If it only needs a tiny, obvious fix (typing, fixture typo, import suffix, brittle assertion, narrow cleanup), patch it directly as orchestrator, rerun targeted verification, then accept. If it is incomplete, unsafe, broad, or unclear, call atp_reject_node or edit the ATP graph. Keep user-facing prose minimal.",
 	].join("\n");
 	try {
 		void Promise.resolve(
@@ -593,7 +593,7 @@ function orchestratorPrompt(): string {
 		"You may edit the ATP JSON freely when the graph needs replanning, splitting, rewiring, or cleanup.",
 		"Prefer micro-nodes: workers should receive narrow, independently verifiable work. If a node is too broad, split it before spawning.",
 		"After spawning background workers, do not fill time with narration. Wait for completion messages, then judge.",
-		"When a worker completion arrives: inspect the candidate report/artifacts/diff as needed, then call atp_accept_node or atp_reject_node. Keep prose minimal.",
+		"When a worker completion arrives: inspect the candidate report/artifacts/diff as needed. For tiny, obvious issues (typing/fixture/import typo, brittle assertion, missing narrow cleanup), patch directly as orchestrator, rerun targeted verification, and then accept. Reject/retry only when the result is incomplete, unsafe, broad, unclear, or would require substantial rework. Keep prose minimal.",
 	].join("\n");
 }
 
@@ -798,7 +798,10 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 		label: "ATP Accept Node",
 		description: "Judge-approve a completed worker candidate, mark the node COMPLETED, and refresh downstream READY nodes.",
 		promptSnippet: "Accept a worker result and unblock dependent ATP nodes.",
-		promptGuidelines: ["Use atp_accept_node only after judging the worker report/artifacts are acceptable."],
+		promptGuidelines: [
+			"Use atp_accept_node only after judging the worker report/artifacts are acceptable.",
+			"It is acceptable to make tiny, obvious orchestrator fixes before accepting, provided you inspect the diff and rerun relevant verification.",
+		],
 		parameters: Type.Object({
 			planPath: PlanPathParam,
 			nodeId: Type.String(),
@@ -829,7 +832,10 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 		label: "ATP Reject Node",
 		description: "Reject a worker candidate. Either retry by returning the node to READY, or mark it FAILED.",
 		promptSnippet: "Reject or retry an ATP worker result.",
-		promptGuidelines: ["Use atp_reject_node when a worker result is incomplete, unsafe, or needs retry/splitting."],
+		promptGuidelines: [
+			"Use atp_reject_node when a worker result is incomplete, unsafe, broad, unclear, or needs retry/splitting.",
+			"Do not reject just to outsource a tiny deterministic fix; patch small typing/fixture/import/assertion issues directly as orchestrator when the scope is clear.",
+		],
 		parameters: Type.Object({
 			planPath: PlanPathParam,
 			nodeId: Type.String(),
