@@ -74,6 +74,8 @@ or:
 atp_reject_node
 ```
 
+The extension injects a continuation reminder on worker completion and judge-tool return: after accepting/rejecting, the orchestrator should immediately call `atp_spawn_ready` with `limit: 1` for the same plan so the ATP does not sit idle.
+
 ## Tools
 
 - `atp_create_plan`

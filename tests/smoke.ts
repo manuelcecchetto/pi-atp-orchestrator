@@ -174,9 +174,15 @@ try {
   if (graph.nodes.n1.candidate_status !== "DONE") throw new Error(`candidate missing: ${JSON.stringify(graph.nodes.n1)}`);
   if ((await fsp.readFile(path.join(tmp, "hello.txt"), "utf8")) !== "done\n") throw new Error("worker did not edit hello.txt");
   if (!messages.some((m) => String(m.content || "").includes("ATP WORKER COMPLETE"))) throw new Error("completion message not delivered");
+  if (!messages.some((m) => String(m.content || "").includes("atp_spawn_ready"))) throw new Error("completion did not inject next-worker reminder");
 
+  const messagesBeforeAccept = messages.length;
   const accept = await tools.atp_accept_node.execute("accept", { planPath, nodeId: "n1" }, undefined, undefined, ctx);
   if (!accept.content[0].text.includes("Accepted n1")) throw new Error(`accept failed: ${accept.content[0].text}`);
+  if (!accept.content[0].text.includes("atp_spawn_ready")) throw new Error("accept result did not repeat next-worker reminder");
+  if (!messages.slice(messagesBeforeAccept).some((m) => String(m.content || "").includes("ATP JUDGE CONTINUATION"))) {
+    throw new Error("accept did not inject judge continuation message");
+  }
   graph = JSON.parse(await fsp.readFile(planPath, "utf8"));
   if (graph.nodes.n1.status !== "COMPLETED") throw new Error(`not completed: ${graph.nodes.n1.status}`);
   if (!graph.nodes.n1.report.includes("Changed hello.txt")) throw new Error("candidate report not copied");

@@ -70,9 +70,12 @@ type ParsedWorkerResult = {
 	rawOutput: string;
 };
 
+type ProgressReporter = (message: string) => void;
+
 const DEFAULT_PLAN_PATH = process.env.ATP_FILE || ".atp.json";
 const EXTENSION_DIR = path.dirname(decodeURIComponent(new URL(import.meta.url).pathname));
 const COMPLETION_TYPE = "pi-atp-orchestrator-worker-complete";
+const JUDGE_CONTINUATION_TYPE = "pi-atp-orchestrator-judge-continuation";
 const RESULT_START = "ATP_WORKER_RESULT_JSON_START";
 const RESULT_END = "ATP_WORKER_RESULT_JSON_END";
 const ATP_TOOL_NAMES = [
@@ -92,6 +95,21 @@ let defaultPlanPath = DEFAULT_PLAN_PATH;
 
 function isoNow(): string {
 	return new Date().toISOString();
+}
+
+function formatElapsed(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	return `${minutes}m ${seconds % 60}s`;
+}
+
+function reportProgress(onProgress: ProgressReporter | undefined, message: string): void {
+	try {
+		onProgress?.(message);
+	} catch {
+		// Progress hooks are best-effort UI only.
+	}
 }
 
 function resolvePlanPath(cwd: string, input?: string): string {
@@ -193,6 +211,44 @@ function downstreamContext(nodes: Record<string, AtpNode>, nodeId: string): stri
 	const children = findChildren(nodes, nodeId);
 	if (children.length === 0) return "- No downstream children yet.";
 	return children.map((childId) => `- ${childId} (${nodes[childId].status}): ${nodes[childId].title}`).join("\n");
+}
+
+function formatSpawnReadyCall(planPath: string, model?: string, cwd?: string): string {
+	const args: Record<string, unknown> = { planPath, limit: 1 };
+	if (model) args.model = model;
+	if (cwd) args.cwd = cwd;
+	return `atp_spawn_ready with ${JSON.stringify(args)}`;
+}
+
+function judgeContinuationInstruction(params: { planPath: string; nodeId?: string; model?: string; cwd?: string }): string {
+	return [
+		"[ATP JUDGE CONTINUATION]",
+		params.nodeId ? `Node: ${params.nodeId}` : undefined,
+		`Plan: ${params.planPath}`,
+		"After the judge action, do not stop after atp_accept_node or atp_reject_node.",
+		`Immediately call ${formatSpawnReadyCall(params.planPath, params.model, params.cwd)} before any final prose so the ATP stays busy.`,
+		"Call atp_spawn_ready even if you think no nodes are READY; the tool will report that. If graph edits/splitting are required, do them first, then call atp_spawn_ready.",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+function queueJudgeContinuation(pi: ExtensionAPI, params: { planPath: string; nodeId?: string; model?: string; cwd?: string }): void {
+	try {
+		void Promise.resolve(
+			pi.sendMessage(
+				{
+					customType: JUDGE_CONTINUATION_TYPE,
+					content: judgeContinuationInstruction(params),
+					display: false,
+					details: params,
+				},
+				{ triggerTurn: true, deliverAs: "steer" },
+			),
+		).catch(() => undefined);
+	} catch {
+		// Message injection is best-effort; the judge tool result repeats the directive.
+	}
 }
 
 function formatClaimedTask(nodeId: string, node: AtpNode, nodes: Record<string, AtpNode>): ClaimedTask {
@@ -387,6 +443,7 @@ async function createPlan(params: {
 	brief: string;
 	mode: "micro" | "macro";
 	model?: string;
+	onProgress?: ProgressReporter;
 }): Promise<AtpGraph> {
 	const adapter = [
 		"### pi-atp-orchestrator planning adapter",
@@ -394,6 +451,7 @@ async function createPlan(params: {
 		"Set meta.version to 1.3 and meta.project_status to DRAFT.",
 		"Do not include runtime fields such as worker_id, started_at, completed_at, artifacts, or report.",
 	].join("\n");
+	reportProgress(params.onProgress, `Starting ${params.mode} architect subprocess`);
 	const raw = await runPiJsonPrompt({
 		cwd: params.cwd,
 		runId: `atp-plan-${randomUUID().slice(0, 8)}`,
@@ -402,11 +460,14 @@ async function createPlan(params: {
 		model: params.model,
 		tools: ["read", "grep", "find", "ls"],
 	});
+	reportProgress(params.onProgress, "Parsing architect output");
 	const graph = parsePlanJson(raw, params.planPath);
+	reportProgress(params.onProgress, `Writing plan to ${params.planPath}`);
 	await withFileMutationQueue(params.planPath, async () => {
 		await fsp.mkdir(path.dirname(params.planPath), { recursive: true });
 		await fsp.writeFile(params.planPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
 	});
+	reportProgress(params.onProgress, "Plan written");
 	return graph;
 }
 
@@ -481,6 +542,7 @@ async function claimNextReady(planPath: string, runId: string): Promise<ClaimedT
 function deliverCompletion(run: DirectRun): void {
 	const pi = latestPi;
 	if (!pi) return;
+	orchestratorMode = true;
 	const result = run.result;
 	const content = [
 		`[ATP WORKER COMPLETE — ${run.runId}]`,
@@ -491,6 +553,8 @@ function deliverCompletion(run: DirectRun): void {
 		result?.report || run.error || "(no report)",
 		"",
 		"Judge this result. Inspect the diff or artifacts if needed. If it only needs a tiny, obvious fix (typing, fixture typo, import suffix, brittle assertion, narrow cleanup), patch it directly as orchestrator, rerun targeted verification, then accept. If it is incomplete, unsafe, broad, or unclear, call atp_reject_node or edit the ATP graph. Keep user-facing prose minimal.",
+		"",
+		judgeContinuationInstruction({ planPath: run.planPath, nodeId: run.nodeId, model: run.model, cwd: run.cwd }),
 	].join("\n");
 	try {
 		void Promise.resolve(
@@ -593,7 +657,7 @@ function orchestratorPrompt(): string {
 		"You may edit the ATP JSON freely when the graph needs replanning, splitting, rewiring, or cleanup.",
 		"Prefer micro-nodes: workers should receive narrow, independently verifiable work. If a node is too broad, split it before spawning.",
 		"After spawning background workers, do not fill time with narration. Wait for completion messages, then judge.",
-		"When a worker completion arrives: inspect the candidate report/artifacts/diff as needed. For tiny, obvious issues (typing/fixture/import typo, brittle assertion, missing narrow cleanup), patch directly as orchestrator, rerun targeted verification, and then accept. Reject/retry only when the result is incomplete, unsafe, broad, unclear, or would require substantial rework. Keep prose minimal.",
+		"When a worker completion arrives: inspect the candidate report/artifacts/diff as needed. For tiny, obvious issues (typing/fixture/import typo, brittle assertion, missing narrow cleanup), patch directly as orchestrator, rerun targeted verification, and then accept. Reject/retry only when the result is incomplete, unsafe, broad, unclear, or would require substantial rework. After the judge tool returns, always call atp_spawn_ready once with limit 1 for the same plan before final prose, even if you expect there may be no READY nodes.",
 	].join("\n");
 }
 
@@ -624,10 +688,28 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 				return;
 			}
 			orchestratorMode = true;
+			const planPath = resolvePlanPath(ctx.cwd, defaultPlanPath);
+			const startedAt = Date.now();
+			let step = "Starting";
+			const renderProgress = () => {
+				const elapsed = formatElapsed(Date.now() - startedAt);
+				ctx.ui.setStatus("atp-plan", `ATP ${mode} plan ${elapsed}`);
+				ctx.ui.setWidget(
+					"atp-plan-progress",
+					[`Creating ATP ${mode} plan... ${elapsed}`, `Step: ${step}`, `Plan: ${planPath}`],
+					{ placement: "belowEditor" },
+				);
+			};
+			const setStep = (nextStep: string) => {
+				step = nextStep;
+				renderProgress();
+			};
+			const progressTimer = setInterval(renderProgress, 1000);
 			ctx.ui.notify(`Creating ATP ${mode} plan...`, "info");
+			renderProgress();
 			try {
-				const planPath = resolvePlanPath(ctx.cwd, defaultPlanPath);
-				const graph = await createPlan({ cwd: ctx.cwd, planPath, brief, mode });
+				const graph = await createPlan({ cwd: ctx.cwd, planPath, brief, mode, onProgress: setStep });
+				setStep(`Done (${Object.keys(graph.nodes).length} nodes)`);
 				pi.sendMessage({
 					customType: COMPLETION_TYPE,
 					content: `Created ATP ${mode} plan: ${planPath}\n\n${summarizeGraph(graph)}\n\nReview it, then call atp_activate when ready.`,
@@ -635,6 +717,10 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 				});
 			} catch (error) {
 				ctx.ui.notify(`ATP plan failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			} finally {
+				clearInterval(progressTimer);
+				ctx.ui.setStatus("atp-plan", undefined);
+				ctx.ui.setWidget("atp-plan-progress", undefined);
 			}
 		},
 	});
@@ -677,10 +763,19 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 			mode: Type.Optional(StringEnum(["micro", "macro"] as const, { default: "micro" })),
 			model: ModelParam,
 		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
+		async execute(_id, params, _signal, onUpdate, ctx) {
 			const planPath = resolvePlanPath(ctx.cwd, params.planPath);
 			const mode = params.mode || "micro";
-			const graph = await createPlan({ cwd: ctx.cwd, planPath, brief: params.brief, mode, model: params.model });
+			const startedAt = Date.now();
+			const emitProgress = (step: string) => {
+				const elapsed = formatElapsed(Date.now() - startedAt);
+				onUpdate?.({
+					content: [{ type: "text", text: `Creating ATP ${mode} plan... ${elapsed}\n${step}` }],
+					details: { planPath, mode, step, elapsedMs: Date.now() - startedAt },
+				});
+			};
+			emitProgress("Starting");
+			const graph = await createPlan({ cwd: ctx.cwd, planPath, brief: params.brief, mode, model: params.model, onProgress: emitProgress });
 			orchestratorMode = true;
 			return {
 				content: [{ type: "text", text: `Created ATP ${mode} plan at ${planPath}.\n\n${summarizeGraph(graph)}` }],
@@ -801,6 +896,7 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use atp_accept_node only after judging the worker report/artifacts are acceptable.",
 			"It is acceptable to make tiny, obvious orchestrator fixes before accepting, provided you inspect the diff and rerun relevant verification.",
+			"After atp_accept_node returns, call atp_spawn_ready once with limit 1 for the same plan before final prose.",
 		],
 		parameters: Type.Object({
 			planPath: PlanPathParam,
@@ -823,7 +919,9 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 				const ready = refreshReadyNodes(graph);
 				return `Accepted ${params.nodeId}. Newly READY: ${ready.join(", ") || "none"}${scopes.length ? `. Scopes completed: ${scopes.join(", ")}` : ""}`;
 			});
-			return { content: [{ type: "text", text }], details: { planPath, nodeId: params.nodeId } };
+			const continuation = judgeContinuationInstruction({ planPath, nodeId: params.nodeId });
+			queueJudgeContinuation(pi, { planPath, nodeId: params.nodeId });
+			return { content: [{ type: "text", text: `${text}\n\n${continuation}` }], details: { planPath, nodeId: params.nodeId } };
 		},
 	});
 
@@ -835,6 +933,7 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use atp_reject_node when a worker result is incomplete, unsafe, broad, unclear, or needs retry/splitting.",
 			"Do not reject just to outsource a tiny deterministic fix; patch small typing/fixture/import/assertion issues directly as orchestrator when the scope is clear.",
+			"After atp_reject_node returns, call atp_spawn_ready once with limit 1 for the same plan before final prose.",
 		],
 		parameters: Type.Object({
 			planPath: PlanPathParam,
@@ -861,7 +960,9 @@ export default function piAtpOrchestratorExtension(pi: ExtensionAPI) {
 				refreshReadyNodes(graph);
 				return `${params.retry ?? true ? "Rejected and queued retry for" : "Rejected and failed"} ${params.nodeId}.`;
 			});
-			return { content: [{ type: "text", text }], details: { planPath, nodeId: params.nodeId } };
+			const continuation = judgeContinuationInstruction({ planPath, nodeId: params.nodeId });
+			queueJudgeContinuation(pi, { planPath, nodeId: params.nodeId });
+			return { content: [{ type: "text", text: `${text}\n\n${continuation}` }], details: { planPath, nodeId: params.nodeId } };
 		},
 	});
 }
